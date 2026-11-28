@@ -19,10 +19,7 @@ MAX_CHARS = 5000
 MAX_POSTS = 10
 MAX_SUMMARIES = 300
 UNNAMED = "Autres compétitions"
-
-# === CONFIG SCOREZONE ===
-INTERVAL = 120  # 2 minutes entre chaque LIVE SCORE
-ERROR_SLEEP = 30
+STATE_FILE = "bot_state.json"
 
 PRIORITY = [
     ("uefa.champions", "🇪🇺", "UEFA Champions League"),
@@ -75,10 +72,31 @@ TEMPLATES = ["dates={d}&limit=1000", "dates={d}", ""]
 QUERY = {}
 errors = 0
 
-# Mémoire des scores pour détecter les BUTS et les FT
 LAST_SCORES = {}
 LAST_GOAL_TIME = {}
 ALREADY_FT = set()
+LAST_EVENTS = {}
+
+def load_state():
+    global LAST_SCORES, LAST_GOAL_TIME, ALREADY_FT, LAST_EVENTS
+    try:
+        if os.path.exists(STATE_FILE):
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            LAST_SCORES = data.get("scores", {})
+            LAST_GOAL_TIME = data.get("goal_time", {})
+            ALREADY_FT = set(data.get("ft", []))
+            LAST_EVENTS = data.get("events", {})
+            print(f"Mémoire chargée : {len(LAST_SCORES)} scores")
+    except Exception as e:
+        print(f"Pas de mémoire : {e}")
+
+def save_state():
+    try:
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"scores": LAST_SCORES, "goal_time": LAST_GOAL_TIME, "ft": list(ALREADY_FT), "events": LAST_EVENTS}, f)
+    except Exception as e:
+        print(f"Erreur sauvegarde : {e}")
 
 def get(url):
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
@@ -131,7 +149,6 @@ def fetch_scoreboard(slug):
             raise
         if kind not in QUERY:
             QUERY[kind] = tpl
-            print(f"Format ESPN retenu ({kind}) : {tpl or 'aucun'}")
         return {"events": events, "leagues": leagues}
     raise last
 
@@ -165,14 +182,11 @@ def collect():
             print(f"{slug} : erreur {e}")
             continue
         for ev in data["events"]:
-            if ev["id"] not in found:
-                # On garde les LIVE pour le LIVE SCORE, et les FT pour le post FT
-                if is_live(ev) or is_finished(ev):
-                    found[ev["id"]] = {
-                        "ev": ev, "group": (0, i, name), "flag": flag,
-                        "name": name, "slug": slug, "priority": True,
-                    }
-    n_priority = len(found)
+            if ev["id"] not in found and (is_live(ev) or is_finished(ev)):
+                found[ev["id"]] = {
+                    "ev": ev, "group": (0, i, name), "flag": flag,
+                    "name": name, "slug": slug, "priority": True,
+                }
     try:
         data = fetch_scoreboard("all")
         names = {str(lg.get("id")): lg.get("name") for lg in data["leagues"]}
@@ -325,51 +339,89 @@ def build_posts(items, stats):
         posts.append(cur.rstrip())
     return posts
 
-def check_but_prioritaire(items):
-    """BIIIP immédiat si but dans un match prioritaire."""
+def get_event_signature(ev):
+    comp = ev["competitions"][0]
+    sig = []
+    for d in comp.get("details", []):
+        type_id = str((d.get("type") or {}).get("id", ""))
+        clock = (d.get("clock") or {}).get("displayValue", "")
+        team_id = str((d.get("team") or {}).get("id", ""))
+        text = (d.get("type") or {}).get("text", "").lower()
+        is_goal = type_id == "70" or "goal" in text or "but" in text
+        is_penalty = type_id in ["93", "94"] or "penalty" in text or "penal" in text
+        is_red = type_id == "68" or "red" in text or "rouge" in text
+        if is_goal or is_penalty or is_red:
+            sig.append(f"{type_id}-{clock}-{team_id}-{text}")
+    home = next(c for c in comp["competitors"] if c.get("homeAway") == "home")
+    away = next(c for c in comp["competitors"] if c.get("homeAway") == "away")
+    sig.append(f"SCORE-{home.get('score',0)}-{away.get('score',0)}")
+    return sig
+
+def check_evenements_majeurs(items):
+    global LAST_EVENTS
     for it in items:
         if not it["priority"]:
             continue
         if not is_live(it["ev"]):
             continue
         ev = it["ev"]
+        mid = ev["id"]
+        nouvelle_sig = get_event_signature(ev)
+        ancienne_sig = LAST_EVENTS.get(mid, [])
+        if not ancienne_sig:
+            LAST_EVENTS[mid] = nouvelle_sig
+            home = next(c for c in ev["competitions"][0]["competitors"] if c.get("homeAway") == "home")
+            away = next(c for c in ev["competitions"][0]["competitors"] if c.get("homeAway") == "away")
+            LAST_SCORES[mid] = f"{home.get('score',0)}-{away.get('score',0)}"
+            continue
+        nouveaux = [s for s in nouvelle_sig if s not in ancienne_sig]
+        LAST_EVENTS[mid] = nouvelle_sig
+        if not nouveaux:
+            continue
         comp = ev["competitions"][0]
         home = next(c for c in comp["competitors"] if c.get("homeAway") == "home")
         away = next(c for c in comp["competitors"] if c.get("homeAway") == "away")
-        score = f"{home.get('score', 0)}-{away.get('score', 0)}"
-        mid = ev["id"]
-        ancien = LAST_SCORES.get(mid)
-        if ancien is None:
-            LAST_SCORES[mid] = score
+        score = f"{home.get('score',0)}-{away.get('score',0)}"
+        minute = clock_label(ev)
+        # Anti-spam : pas 2 BIIIP pour le même match dans le même run
+        if LAST_GOAL_TIME.get(mid, 0) == int(time.time() // 300):
             continue
-        if score != ancien:
-            LAST_SCORES[mid] = score
-            now = time.time()
-            if now - LAST_GOAL_TIME.get(mid, 0) < 120:
-                continue
-            LAST_GOAL_TIME[mid] = now
-            minute = clock_label(ev)
+        for n in nouveaux:
+            nl = n.lower()
+            if "penal" in nl or n.startswith("93-") or n.startswith("94-"):
+                if "rat" in nl or n.startswith("94-"):
+                    titre = "❌ PENALTY RATÉ !"
+                    texte = "Le penalty est raté !"
+                else:
+                    titre = "🎯🧨 BIIIP ! PENALTY MARQUÉ ! 🧨🎯"
+                    texte = "Penalty transformé !"
+            elif "rouge" in nl or "red" in nl or n.startswith("68-"):
+                titre = "🟥🧨 BIIIP ! CARTON ROUGE ! 🧨🟥"
+                texte = "Un joueur est expulsé, le match va changer !"
+            else:
+                titre = "⚽🧨 BIIIP ! BUT ! 🧨⚽"
+                texte = "Nouveau score, le match a changé !"
+            LAST_GOAL_TIME[mid] = int(time.time() // 300)
             msg = (
-                f"⚽🧨 BIIIP ! BUT ! 🧨⚽\n\n"
+                f"{titre}\n\n"
                 f"{it['flag']} {it['name']}\n"
                 f"◉ {minute} | {home['team']['displayName']} {score} {away['team']['displayName']}\n\n"
-                f"🔥 Nouveau score, le match a changé !\n"
+                f"🔥 {texte}\n"
                 f"⚽🚩 LIVE SCORE en direct sur la page"
             )
-            print(f"🚨 BUT : {home['team']['displayName']} {score} {away['team']['displayName']}")
+            print(f"🚨 ÉVÉNEMENT MAJEUR : {titre} - {home['team']['displayName']} {score} {away['team']['displayName']}")
             publish(msg)
             time.sleep(2)
+            break
 
 def check_ft(items, stats):
-    """Post FT quand un match se termine, comme ScoreZone."""
     for it in items:
         ev = it["ev"]
         if not is_finished(ev):
             continue
         if ev["id"] in ALREADY_FT:
             continue
-        # On ne poste FT que si on l'a déjà vu en live avant, sinon on spammerait les vieux matchs
-        if ev["id"] not in LAST_SCORES:
+        if ev["id"] not in LAST_SCORES and ev["id"] not in LAST_EVENTS:
             continue
         ALREADY_FT.add(ev["id"])
         comp = ev["competitions"][0]
@@ -387,43 +439,38 @@ def check_ft(items, stats):
         publish(msg)
         time.sleep(2)
 
-def one_cycle():
+def main():
+    if TEST_POST:
+        ok = publish("✅ Test : le bot de scores fonctionne.")
+        sys.exit(0 if ok else 1)
+
+    # GITHUB SEULEMENT : 1 seul passage, puis on s'arrête. GitHub relance toutes les 5 min.
+    print("Mode GitHub : 1 seul cycle puis je m'arrête")
+    load_state()
     items = collect()
     if not items:
         print("Aucun match en direct.")
+        save_state()
         return
     items.sort(key=lambda it: it["group"])
     stats, extra = fetch_details(items)
     enrich(items, extra)
 
-    # 1. BUT prioritaire = BIIIP tout de suite
-    check_but_prioritaire(items)
-    # 2. Match terminé = post FT
+    # 1. D'abord les événements majeurs : BUT / PENALTY / ROUGE -> BIIIP tout de suite
+    check_evenements_majeurs(items)
+    # 2. Ensuite les FT
     check_ft(items, stats)
-    # 3. LIVE normal = nouveau post toutes les 2 minutes
+    # 3. Ensuite le LIVE normal
     live_items = [it for it in items if is_live(it["ev"])]
-    if not live_items:
-        print("Plus de live, j'attends.")
-        return
-    posts = build_posts(live_items, stats)[:MAX_POSTS]
-    for post in posts:
-        publish(post)
-        time.sleep(2)
-
-def main():
-    if TEST_POST:
-        ok = publish("✅ Test : le bot de scores fonctionne.")
-        sys.exit(0 if ok else 1)
-    print(f"Bot ScoreZone démarré - LIVE toutes les {INTERVAL}s - BUT = BIIIP immédiat - ne s'arrête jamais")
-    while True:
-        try:
-            one_cycle()
-        except Exception as e:
-            print(f"Erreur cycle : {e} - je réessaie dans {ERROR_SLEEP}s")
-            time.sleep(ERROR_SLEEP)
-            continue
-        print(f"Cycle fini, j'attends {INTERVAL}s...")
-        time.sleep(INTERVAL)
+    if live_items:
+        posts = build_posts(live_items, stats)[:MAX_POSTS]
+        for post in posts:
+            publish(post)
+            time.sleep(2)
+    else:
+        print("Plus de live.")
+    save_state()
+    print("Cycle fini, je m'arrête proprement")
 
 if __name__ == "__main__":
     main()
