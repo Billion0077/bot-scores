@@ -1,9 +1,9 @@
 name: Scores Facebook
 
 on:
+  # Filet de sécurité de GitHub (souvent lent). Le vrai rythme viendra de cron-job.org
   schedule:
-    # toutes les 15 minutes, de 11h a 22h59 (heure UTC)
-    - cron: "*/15 11-22 * * *"
+    - cron: "7,37 10-22 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
@@ -12,9 +12,6 @@ on:
       test_post:
         description: "Publier un message de test (true ou false)"
         default: "false"
-
-permissions:
-  contents: write
 
 concurrency:
   group: scores
@@ -37,15 +34,7 @@ jobs:
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           TEST_POST: ${{ github.event.inputs.test_post || 'false' }}
+          INTERVAL_MIN: "30"
+          END_HOUR: "23"
         run: python bot.py
-
-      - name: Sauvegarder l'état
-        if: always()
-        run: |
-          if [ -f state_v2.json ]; then
-            git config user.name "github-actions"
-            git config user.email "github-actions@users.noreply.github.com"
-            git add state_v2.json
-            git diff --staged --quiet || (git commit -m "maj etat" && git push)
-          fi
-          
+        
