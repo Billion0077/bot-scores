@@ -29,12 +29,9 @@ jobs:
 
       - name: Lancer le bot
         env:
-          APIFOOTBALL_KEY: ${{ secrets.APIFOOTBALL_KEY }}
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
           FB_PAGE_TOKEN: ${{ secrets.FB_PAGE_TOKEN }}
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           TEST_POST: ${{ github.event.inputs.test_post || 'false' }}
-          INTERVAL_MIN: "30"
-          END_HOUR: "23"
         run: python bot.py
         
