@@ -1,5 +1,4 @@
 name: Scores Facebook
-
 on:
   # Filet de sécurité de GitHub (souvent lent). Le vrai rythme viendra de cron-job.org
   schedule:
@@ -12,21 +11,18 @@ on:
       test_post:
         description: "Publier un message de test (true ou false)"
         default: "false"
-
 concurrency:
   group: scores
   cancel-in-progress: false
-
 jobs:
   run:
     runs-on: ubuntu-latest
+    timeout-minutes: 4
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-
       - name: Lancer le bot
         env:
           FB_PAGE_ID: ${{ secrets.FB_PAGE_ID }}
@@ -34,4 +30,10 @@ jobs:
           DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
           TEST_POST: ${{ github.event.inputs.test_post || 'false' }}
         run: python bot.py
-        
+      - name: Sauvegarder la mémoire des scores
+        run: |
+          git config user.name "bot"
+          git config user.email "bot@bot.com"
+          git add bot_state.json || true
+          git commit -m "memoire scores" || true
+          git push || true
