@@ -71,14 +71,42 @@ def publish(message):
     return False
 
 
-def date_range():
+def day_queries():
     today = datetime.datetime.now(datetime.timezone.utc).date()
     yesterday = today - datetime.timedelta(days=1)
-    return f"{yesterday:%Y%m%d}-{today:%Y%m%d}"
+    rng = f"{yesterday:%Y%m%d}-{today:%Y%m%d}"
+    day = f"{today:%Y%m%d}"
+    return [
+        f"dates={rng}&limit=1000",
+        f"dates={rng}",
+        f"dates={day}&limit=1000",
+        f"dates={day}",
+        "",
+    ]
+
+
+QUERY = {}  # parametres qui marchent, retenus apres le premier succes
 
 
 def fetch_scoreboard(slug):
-    return get(f"{BASE}/{slug}/scoreboard?dates={date_range()}&limit=1000")
+    """Essaie plusieurs formats de requete jusqu'a ce qu'ESPN en accepte un."""
+    kind = "all" if slug == "all" else "league"
+    options = [QUERY[kind]] if kind in QUERY else day_queries()
+    last = None
+    for q in options:
+        url = f"{BASE}/{slug}/scoreboard" + (f"?{q}" if q else "")
+        try:
+            data = get(url)
+        except urllib.error.HTTPError as e:
+            last = e
+            if e.code == 400:
+                continue
+            raise
+        if kind not in QUERY:
+            QUERY[kind] = q
+            print(f"Paramètres ESPN retenus ({kind}) : {q or 'aucun'}")
+        return data
+    raise last
 
 
 def is_live(ev):
@@ -262,4 +290,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-                
+    
