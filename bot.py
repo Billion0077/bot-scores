@@ -15,8 +15,9 @@ TEST_POST = os.environ.get("TEST_POST", "false").lower() == "true"
 BASE = "https://site.api.espn.com/apis/site/v2/sports/soccer"
 GRAPH_URL = "https://graph.facebook.com/v27.0"
 MAX_CHARS = 5000  # taille max d'un post
-MAX_POSTS = 4  # nombre max de posts par execution
-MAX_SUMMARIES = 60  # nombre max de matchs dont on lit les statistiques
+MAX_POSTS = 10  # nombre max de posts par execution
+MAX_SUMMARIES = 300  # nombre max de matchs dont on lit les statistiques
+UNNAMED = "Autres compétitions"
 
 # Competitions affichees en premier : (code ESPN, drapeau, nom)
 PRIORITY = [
@@ -30,6 +31,25 @@ PRIORITY = [
     ("fra.1", "🇫🇷", "Ligue 1"),
 ]
 
+# Drapeaux selon le debut du code de la competition (ex. "ger.2" -> Allemagne)
+FLAGS = {
+    "eng": "🇬🇧", "sco": "🇬🇧", "wal": "🇬🇧", "nir": "🇬🇧", "esp": "🇪🇸", "ita": "🇮🇹",
+    "ger": "🇩🇪", "fra": "🇫🇷", "ned": "🇳🇱", "por": "🇵🇹", "tur": "🇹🇷", "rus": "🇷🇺",
+    "chn": "🇨🇳", "ksa": "🇸🇦", "bra": "🇧🇷", "arg": "🇦🇷", "usa": "🇺🇸", "mex": "🇲🇽",
+    "bel": "🇧🇪", "gre": "🇬🇷", "swe": "🇸🇪", "nor": "🇳🇴", "den": "🇩🇰", "sui": "🇨🇭",
+    "aut": "🇦🇹", "cze": "🇨🇿", "pol": "🇵🇱", "ukr": "🇺🇦", "jpn": "🇯🇵", "kor": "🇰🇷",
+    "aus": "🇦🇺", "col": "🇨🇴", "chi": "🇨🇱", "uru": "🇺🇾", "ecu": "🇪🇨", "par": "🇵🇾",
+    "per": "🇵🇪", "ven": "🇻🇪", "bol": "🇧🇴", "egy": "🇪🇬", "mar": "🇲🇦", "alg": "🇩🇿",
+    "tun": "🇹🇳", "rsa": "🇿🇦", "irn": "🇮🇷", "qat": "🇶🇦", "uae": "🇦🇪", "isr": "🇮🇱",
+    "cro": "🇭🇷", "srb": "🇷🇸", "rou": "🇷🇴", "hun": "🇭🇺", "bul": "🇧🇬", "svk": "🇸🇰",
+    "svn": "🇸🇮", "fin": "🇫🇮", "irl": "🇮🇪", "ind": "🇮🇳", "tha": "🇹🇭", "idn": "🇮🇩",
+    "vie": "🇻🇳", "cyp": "🇨🇾", "alb": "🇦🇱", "geo": "🇬🇪", "arm": "🇦🇲", "aze": "🇦🇿",
+    "kaz": "🇰🇿", "blr": "🇧🇾", "lva": "🇱🇻", "ltu": "🇱🇹", "est": "🇪🇪", "isl": "🇮🇸",
+    "mlt": "🇲🇹", "lux": "🇱🇺", "bih": "🇧🇦", "mne": "🇲🇪", "mkd": "🇲🇰", "mda": "🇲🇩",
+    "gua": "🇬🇹", "crc": "🇨🇷", "hon": "🇭🇳", "slv": "🇸🇻", "pan": "🇵🇦", "jam": "🇯🇲",
+    "can": "🇨🇦", "nzl": "🇳🇿", "gha": "🇬🇭", "nga": "🇳🇬", "ken": "🇰🇪", "sen": "🇸🇳",
+}
+
 STATS = [
     ("⛳", "wonCorners", True),
     ("🟨", "yellowCards", True),
@@ -40,6 +60,8 @@ STATS = [
     ("🅿️", "possessionPct", True),
 ]
 
+TEMPLATES = ["dates={d}&limit=1000", "dates={d}", ""]  # essayes dans cet ordre
+QUERY = {}  # format retenu apres le premier succes
 errors = 0
 
 
@@ -71,46 +93,42 @@ def publish(message):
     return False
 
 
-def day_queries():
-    today = datetime.datetime.now(datetime.timezone.utc).date()
-    yesterday = today - datetime.timedelta(days=1)
-    rng = f"{yesterday:%Y%m%d}-{today:%Y%m%d}"
-    day = f"{today:%Y%m%d}"
-    return [
-        f"dates={rng}&limit=1000",
-        f"dates={rng}",
-        f"dates={day}&limit=1000",
-        f"dates={day}",
-        "",
-    ]
-
-
-QUERY = {}  # parametres qui marchent, retenus apres le premier succes
-
-
 def fetch_scoreboard(slug):
-    """Essaie plusieurs formats de requete jusqu'a ce qu'ESPN en accepte un."""
+    """Matchs d'hier et d'aujourd'hui (UTC). Essaie plusieurs formats si ESPN refuse."""
     kind = "all" if slug == "all" else "league"
-    options = [QUERY[kind]] if kind in QUERY else day_queries()
+    templates = [QUERY[kind]] if kind in QUERY else TEMPLATES
+    today = datetime.datetime.now(datetime.timezone.utc).date()
+    days = [today - datetime.timedelta(days=1), today]
     last = None
-    for q in options:
-        url = f"{BASE}/{slug}/scoreboard" + (f"?{q}" if q else "")
+    for tpl in templates:
         try:
-            data = get(url)
+            events, leagues, seen = [], [], set()
+            for d in days if tpl else [None]:
+                q = tpl.replace("{d}", f"{d:%Y%m%d}") if d else tpl
+                data = get(f"{BASE}/{slug}/scoreboard" + (f"?{q}" if q else ""))
+                leagues += data.get("leagues", [])
+                for ev in data.get("events", []):
+                    if ev["id"] not in seen:
+                        seen.add(ev["id"])
+                        events.append(ev)
         except urllib.error.HTTPError as e:
             last = e
             if e.code == 400:
                 continue
             raise
         if kind not in QUERY:
-            QUERY[kind] = q
-            print(f"Paramètres ESPN retenus ({kind}) : {q or 'aucun'}")
-        return data
+            QUERY[kind] = tpl
+            print(f"Format ESPN retenu ({kind}) : {tpl or 'aucun'}")
+        return {"events": events, "leagues": leagues}
     raise last
 
 
 def is_live(ev):
     return (ev.get("status") or {}).get("type", {}).get("state") == "in"
+
+
+def flag_for(slug):
+    return FLAGS.get((slug or "").split(".")[0], "🌍")
 
 
 def league_name(ev, names):
@@ -120,7 +138,11 @@ def league_name(ev, names):
     for part in (ev.get("uid") or "").split("~"):
         if part.startswith("l:") and names.get(part[2:]):
             return names[part[2:]]
-    return "Autres compétitions"
+    return UNNAMED
+
+
+def make_group(name, tier_if_named=1):
+    return (2 if name == UNNAMED else tier_if_named, 0, name)
 
 
 def collect():
@@ -132,38 +154,41 @@ def collect():
         except Exception as e:
             print(f"{slug} : erreur {e}")
             continue
-        for ev in data.get("events", []):
+        for ev in data["events"]:
             if is_live(ev) and ev["id"] not in found:
                 found[ev["id"]] = {
-                    "ev": ev, "group": (0, i, name), "flag": flag, "name": name, "slug": slug,
+                    "ev": ev, "group": (0, i, name), "flag": flag, "name": name,
+                    "slug": slug, "priority": True,
                 }
     n_priority = len(found)
     try:
         data = fetch_scoreboard("all")
-        names = {str(lg.get("id")): lg.get("name") for lg in data.get("leagues", [])}
-        for ev in data.get("events", []):
+        names = {str(lg.get("id")): lg.get("name") for lg in data["leagues"]}
+        for ev in data["events"]:
             if is_live(ev) and ev["id"] not in found:
                 name = league_name(ev, names)
                 found[ev["id"]] = {
-                    "ev": ev, "group": (1, 0, name), "flag": "🌍", "name": name, "slug": None,
+                    "ev": ev, "group": make_group(name), "flag": "🌍", "name": name,
+                    "slug": None, "priority": False,
                 }
     except Exception as e:
         print(f"all : erreur {e}")
     print(f"{n_priority} match(s) en direct dans les compétitions principales, "
           f"{len(found) - n_priority} autre(s).")
-    return sorted(found.values(), key=lambda it: it["group"])
+    return list(found.values())
 
 
-def fetch_stats(items):
-    out = {}
+def fetch_details(items):
+    """Lit statistiques, mi-temps et nom de competition de chaque match."""
+    stats, extra = {}, {}
     calls = 0
     for it in items:
         if calls >= MAX_SUMMARIES:
             break
         calls += 1
-        slug = it["slug"] or "all"
+        eid = it["ev"]["id"]
         try:
-            data = get(f"{BASE}/{slug}/summary?event={it['ev']['id']}")
+            data = get(f"{BASE}/{it['slug'] or 'all'}/summary?event={eid}")
         except Exception:
             continue
         teams = {}
@@ -171,10 +196,40 @@ def fetch_stats(items):
             tid = (t.get("team") or {}).get("id")
             teams[tid] = {s.get("name"): s.get("displayValue") for s in t.get("statistics", [])}
         if teams:
-            out[it["ev"]["id"]] = teams
+            stats[eid] = teams
+        info = {}
+        header = data.get("header") or {}
+        lg = header.get("league") or {}
+        if lg.get("name"):
+            info["league"] = lg["name"]
+        info["slug"] = lg.get("slug")
+        try:
+            comps = (header.get("competitions") or [{}])[0].get("competitors", [])
+            ls = {}
+            for c in comps:
+                ls[c.get("homeAway")] = [
+                    int(float(x.get("value", 0))) for x in c.get("linescores", [])
+                ]
+            info["ls"] = ls
+        except (ValueError, TypeError):
+            pass
+        extra[eid] = info
         time.sleep(0.15)
-    print(f"Statistiques lues pour {len(out)} match(s) sur {calls} essayé(s).")
-    return out
+    print(f"Détails lus pour {len(extra)} match(s) sur {calls} essayé(s), "
+          f"statistiques pour {len(stats)}.")
+    return stats, extra
+
+
+def enrich(items, extra):
+    for it in items:
+        info = extra.get(it["ev"]["id"]) or {}
+        it["ls"] = info.get("ls")
+        if not it["priority"]:
+            if info.get("league"):
+                it["name"] = info["league"]
+                it["group"] = make_group(it["name"])
+            it["flag"] = flag_for(info.get("slug"))
+    items.sort(key=lambda it: it["group"])
 
 
 def clock_label(ev):
@@ -206,6 +261,18 @@ def card_counts(comp, team_id, flag):
     )
 
 
+def half_scores(home, away, item):
+    try:
+        hl = [int(float(x.get("value", 0))) for x in home.get("linescores", [])]
+        al = [int(float(x.get("value", 0))) for x in away.get("linescores", [])]
+    except (ValueError, TypeError):
+        hl, al = [], []
+    if not (hl and al) and item.get("ls"):
+        hl = item["ls"].get("home") or []
+        al = item["ls"].get("away") or []
+    return hl, al
+
+
 def match_block(item, stats):
     ev = item["ev"]
     comp = ev["competitions"][0]
@@ -218,16 +285,12 @@ def match_block(item, stats):
         f"{away.get('score', 0)} {away['team']['displayName']}"
     ]
 
-    try:
-        hl = [int(float(x.get("value", 0))) for x in home.get("linescores", [])]
-        al = [int(float(x.get("value", 0))) for x in away.get("linescores", [])]
-        if hl and al and name != "STATUS_FIRST_HALF":
-            half = f"➡ 1re MT : {hl[0]}-{al[0]}"
-            if name != "STATUS_HALFTIME" and len(hl) > 1 and len(al) > 1:
-                half += f" | 2e MT : {hl[1]}-{al[1]}"
-            lines.append("   " + half)
-    except (ValueError, TypeError):
-        pass
+    hl, al = half_scores(home, away, item)
+    if hl and al and name != "STATUS_FIRST_HALF":
+        half = f"➡ 1re MT : {hl[0]}-{al[0]}"
+        if name != "STATUS_HALFTIME" and len(hl) > 1 and len(al) > 1:
+            half += f" | 2e MT : {hl[1]}-{al[1]}"
+        lines.append("   " + half)
 
     st = stats.get(ev["id"])
     parts = []
@@ -281,7 +344,9 @@ def main():
     if not items:
         print("Aucun match en direct.")
         return
-    stats = fetch_stats(items)
+    items.sort(key=lambda it: it["group"])
+    stats, extra = fetch_details(items)
+    enrich(items, extra)
     for post in build_posts(items, stats)[:MAX_POSTS]:
         publish(post)
     if errors:
